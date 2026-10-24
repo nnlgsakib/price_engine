@@ -15,15 +15,6 @@ const ENDPOINT: &str = "https://api.coingecko.com/api/v3/simple/price";
 const KEY_HEADER: &str = "x-cg-demo-api-key";
 const KEY_ENV: &str = "COINGECKO_API_KEY";
 
-/// CoinGecko rejects requests that do not identify themselves. Keep this
-/// descriptive and honest: it is how a rate-limited operator attributes usage.
-const USER_AGENT: &str = concat!(
-    env!("CARGO_PKG_NAME"),
-    "/",
-    env!("CARGO_PKG_VERSION"),
-    " (FNF Wallet; +https://github.com/nnlgsakib/fnfwallet)"
-);
-
 /// CoinGecko Demo API client.
 pub struct CoinGecko {
     client: reqwest::Client,
@@ -31,7 +22,10 @@ pub struct CoinGecko {
 }
 
 impl CoinGecko {
-    pub fn new() -> Self {
+    /// `user_agent` names the wallet. CoinGecko refuses requests that do not
+    /// identify themselves, and it is how a rate-limited operator attributes
+    /// usage, so keep it descriptive: `"Nira Wallet/1.0 (+https://example.com)"`.
+    pub fn new(user_agent: &str) -> Self {
         let client = reqwest::Client::builder()
         // Several addresses per name, some unreachable here (IPv6 with no
         // route): each gets a slice of this, then the next is tried.
@@ -41,7 +35,7 @@ impl CoinGecko {
             // requests without one, and reqwest sends none by default. The
             // response is a 403, not an error, so it was being parsed as "no
             // prices" and every asset read as unpriced.
-            .user_agent(USER_AGENT)
+            .user_agent(user_agent)
             .build()
             .unwrap_or_default();
         CoinGecko {
@@ -129,12 +123,12 @@ mod tests {
 
     #[tokio::test]
     async fn no_ids_means_no_request_and_no_prices() {
-        assert!(CoinGecko::new().fetch_ids(&[]).await.is_empty());
+        assert!(CoinGecko::new("price-engine-tests").fetch_ids(&[]).await.is_empty());
     }
 
     #[tokio::test]
     async fn contract_targets_are_not_this_providers_job() {
-        let p = CoinGecko::new();
+        let p = CoinGecko::new("price-engine-tests");
         let map = p.prices(&[Target::contract(1, "0xabc")]).await;
         assert!(map.is_empty());
     }

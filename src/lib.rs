@@ -1,4 +1,5 @@
-//! USD pricing for FNF Wallet.
+//! USD pricing for crypto wallets. Each wallet passes its own User-Agent to
+//! `PriceEngine::new`.
 //!
 //! One concern, deliberately separate from the app and from `registry`:
 //! turning a balance into a USD figure.

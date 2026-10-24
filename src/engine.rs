@@ -58,11 +58,12 @@ pub struct PriceEngine {
 }
 
 impl PriceEngine {
-    /// Default order: CoinGecko, then GeckoTerminal.
-    pub fn new() -> Self {
+    /// Default order: CoinGecko, then GeckoTerminal. `user_agent` names the
+    /// wallet to both (see `CoinGecko::new`).
+    pub fn new(user_agent: &str) -> Self {
         PriceEngine::with_providers(vec![
-            Box::new(CoinGecko::new()),
-            Box::new(GeckoTerminal::new()),
+            Box::new(CoinGecko::new(user_agent)),
+            Box::new(GeckoTerminal::new(user_agent)),
         ])
     }
 
@@ -151,12 +152,6 @@ impl PriceEngine {
             .filter(|t| !resolved.contains_key(*t))
             .cloned()
             .collect()
-    }
-}
-
-impl Default for PriceEngine {
-    fn default() -> Self {
-        PriceEngine::new()
     }
 }
 
@@ -280,7 +275,7 @@ mod tests {
         assert_eq!(first[&id("ethereum")].price, 3000.0);
 
         // A different engine value, as the app builds one per refresh.
-        let second = PriceEngine::new().resolve(&[id("ethereum")]).await;
+        let second = PriceEngine::new("price-engine-tests").resolve(&[id("ethereum")]).await;
         assert_eq!(second[&id("ethereum")].price, 3000.0);
     }
 

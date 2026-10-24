@@ -19,7 +19,7 @@ async fn bundled_registry_assets_resolve_to_real_prices() {
         Target::GeckoId("bitcoin".into()),
     ];
 
-    let resolved = PriceEngine::new().resolve(&targets).await;
+    let resolved = PriceEngine::new("price-engine-tests").resolve(&targets).await;
 
     for t in &targets {
         let got = resolved
@@ -42,7 +42,7 @@ async fn a_contract_only_token_resolves_via_geckoterminal() {
     // USDC on Ethereum, keyed only by address.
     let usdc = Target::contract(1, "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48");
 
-    let resolved = PriceEngine::new().resolve(&[usdc.clone()]).await;
+    let resolved = PriceEngine::new("price-engine-tests").resolve(&[usdc.clone()]).await;
 
     let got = resolved
         .get(&usdc)

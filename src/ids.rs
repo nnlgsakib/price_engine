@@ -109,7 +109,7 @@ mod tests {
     fn solana_is_priced_on_mainnet_and_never_on_devnet() {
         let chains = registry::chains::builtin_only();
         let pick = |id: &str| vec![chains.iter().find(|c| c.id() == id).expect("built in").clone()];
-        let base = std::env::temp_dir().join("fnf-price-no-custom");
+        let base = std::env::temp_dir().join("price-engine-no-custom");
 
         let mainnet = targets_for(&pick("solana"), &base);
         assert!(mainnet.contains(&Target::GeckoId("solana".into())));

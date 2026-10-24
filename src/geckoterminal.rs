@@ -15,15 +15,6 @@ use std::pin::Pin;
 const BASE: &str = "https://api.geckoterminal.com/api/v2";
 const API_VERSION: &str = "application/json;version=20230203";
 
-/// Identifies the caller, as CoinGecko's edge requires. Without it the request
-/// is refused outright rather than answered with data.
-const USER_AGENT: &str = concat!(
-    env!("CARGO_PKG_NAME"),
-    "/",
-    env!("CARGO_PKG_VERSION"),
-    " (FNF Wallet; +https://github.com/nnlgsakib/fnfwallet)"
-);
-
 /// How many addresses to ask for in one call. The endpoint takes a
 /// comma-separated list, so one call covers a whole chain's tokens instead of
 /// burning the 10/min budget one token at a time.
@@ -34,13 +25,16 @@ pub struct GeckoTerminal {
 }
 
 impl GeckoTerminal {
-    pub fn new() -> Self {
+    /// `user_agent` names the wallet. CoinGecko refuses requests that do not
+    /// identify themselves, and it is how a rate-limited operator attributes
+    /// usage, so keep it descriptive: `"Nira Wallet/1.0 (+https://example.com)"`.
+    pub fn new(user_agent: &str) -> Self {
         let client = reqwest::Client::builder()
         // Several addresses per name, some unreachable here (IPv6 with no
         // route): each gets a slice of this, then the next is tried.
         .connect_timeout(std::time::Duration::from_secs(5))
             .timeout(std::time::Duration::from_secs(10))
-            .user_agent(USER_AGENT)
+            .user_agent(user_agent)
             .build()
             .unwrap_or_default();
         GeckoTerminal { client }
@@ -179,7 +173,7 @@ mod tests {
 
     #[tokio::test]
     async fn chain_without_a_gecko_network_is_skipped() {
-        let p = GeckoTerminal::new();
+        let p = GeckoTerminal::new("price-engine-tests");
         // 80002 is Amoy, which GeckoTerminal does not list.
         let map = p.prices(&[Target::contract(80_002, "0xabc")]).await;
         assert!(map.is_empty());
@@ -191,7 +185,7 @@ mod tests {
     #[ignore = "network"]
     async fn a_solana_token_is_priced_by_its_mint() {
         let usdc = Target::Mint("EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v".into());
-        let map = GeckoTerminal::new().prices(std::slice::from_ref(&usdc)).await;
+        let map = GeckoTerminal::new("price-engine-tests").prices(std::slice::from_ref(&usdc)).await;
         let price = map.get(&usdc).expect("USDC on Solana is priced").price;
         assert!((0.9..1.1).contains(&price), "{price}");
     }
