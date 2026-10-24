@@ -42,4 +42,4 @@ pub use network::{chain_id, gecko_network};
 pub use provider::{target_for, PriceMap, Provider, Source, Target};
 pub use value::{price_for, usd_value};
 
-pub use fnf_registry::model::ChainInfo;
+pub use registry::model::ChainInfo;

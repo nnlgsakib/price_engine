@@ -1,7 +1,7 @@
 //! Resolving which price ids a set of chains needs.
 
 use crate::provider::{target_for, Target};
-use fnf_registry::model::ChainInfo;
+use registry::model::ChainInfo;
 use std::path::Path;
 
 /// Every distinct CoinGecko id the registry declares for these chains.
@@ -21,7 +21,7 @@ pub fn ids_for(chains: &[ChainInfo], base: &Path) -> Vec<String> {
                 if let Some(id) = &evm.native_currency.coingecko_id {
                     push(id.clone());
                 }
-                for token in fnf_registry::tokens::tokens_for_chain(base, chain) {
+                for token in registry::tokens::tokens_for_chain(base, chain) {
                     if let Some(id) = token.coingecko_id {
                         push(id);
                     }
@@ -34,7 +34,7 @@ pub fn ids_for(chains: &[ChainInfo], base: &Path) -> Vec<String> {
                 if let Some(id) = &sol.native_currency.coingecko_id {
                     push(id.clone());
                 }
-                for token in fnf_registry::tokens::tokens_for_chain(base, chain) {
+                for token in registry::tokens::tokens_for_chain(base, chain) {
                     if let Some(id) = token.coingecko_id {
                         push(id);
                     }
@@ -67,7 +67,7 @@ pub fn targets_for(chains: &[ChainInfo], base: &Path) -> Vec<Target> {
                 {
                     push(t);
                 }
-                for token in fnf_registry::tokens::tokens_for_chain(base, chain) {
+                for token in registry::tokens::tokens_for_chain(base, chain) {
                     if let Some(t) = target_for(
                         token.coingecko_id.as_deref(),
                         Some(evm.chain_id),
@@ -89,7 +89,7 @@ pub fn targets_for(chains: &[ChainInfo], base: &Path) -> Vec<Target> {
                 if let Some(id) = &sol.native_currency.coingecko_id {
                     push(Target::GeckoId(id.clone()));
                 }
-                for token in fnf_registry::tokens::tokens_for_chain(base, chain) {
+                for token in registry::tokens::tokens_for_chain(base, chain) {
                     match token.coingecko_id.filter(|id| !id.trim().is_empty()) {
                         Some(id) => push(Target::GeckoId(id)),
                         None => push(Target::Mint(token.address)),
@@ -107,7 +107,7 @@ mod tests {
 
     #[test]
     fn solana_is_priced_on_mainnet_and_never_on_devnet() {
-        let chains = fnf_registry::chains::builtin_only();
+        let chains = registry::chains::builtin_only();
         let pick = |id: &str| vec![chains.iter().find(|c| c.id() == id).expect("built in").clone()];
         let base = std::env::temp_dir().join("fnf-price-no-custom");
 
