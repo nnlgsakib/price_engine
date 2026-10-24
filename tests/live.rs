@@ -4,7 +4,7 @@
 //!
 //! Ignored by default because it spends real API quota and needs network.
 
-use fnf_price_engine::{PriceEngine, Target};
+use price_engine::{PriceEngine, Target};
 
 /// The ids the bundled registry declares. If this passes, the engine resolves
 /// the same targets the app asks for on every launch.
