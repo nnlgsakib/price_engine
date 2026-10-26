@@ -12,32 +12,40 @@ use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-/// How long a fetched price set is reused before the providers are called
-/// again.
+/// How long a price is reused before the providers are asked again.
 ///
 /// The free CoinGecko tier is throttled hard (often single-digit requests per
-/// minute without a key). A user pulling to refresh, or a screen remounting,
-/// used to mean another request â€” which is how a refresh storm turned every
-/// price in the portfolio into "unavailable". One shared short-lived cache
-/// collapses that storm into at most one fetch per window.
+/// minute without a key). The wallet asks often: pull to refresh, and a
+/// balance watch that prices one chain at a time every few seconds. The cache
+/// is per coin, so one chain's prices never evict another's, and a coin that
+/// was just asked about (answered or not) waits out this window. That keeps
+/// it to about one fetch a minute.
 const CACHE_TTL: Duration = Duration::from_secs(60);
 
-struct Cached {
-    at: Instant,
-    map: ResolvedMap,
+/// How old a price may be and still be served while the feed is not
+/// answering (throttled, or briefly down). Past this the price is left out
+/// and the app shows its own last-known figure, labelled as such.
+const STALE_MAX: Duration = Duration::from_secs(5 * 60);
+
+/// One coin's cache entry.
+struct Entry {
+    /// When the providers were last asked about it, answered or not.
+    asked: Instant,
+    /// Its last price and when it was fetched.
+    price: Option<(Resolved, Instant)>,
 }
 
 /// Process-wide so the cache outlives individual `PriceEngine` values, which
 /// the app constructs per portfolio refresh.
-fn cache() -> &'static Mutex<Option<Cached>> {
-    static CACHE: OnceLock<Mutex<Option<Cached>>> = OnceLock::new();
-    CACHE.get_or_init(|| Mutex::new(None))
+fn cache() -> &'static Mutex<HashMap<Target, Entry>> {
+    static CACHE: OnceLock<Mutex<HashMap<Target, Entry>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 /// Drops any cached prices. For tests, and for a manual refresh.
 pub fn invalidate_cache() {
     if let Ok(mut guard) = cache().lock() {
-        *guard = None;
+        guard.clear();
     }
 }
 
@@ -73,21 +81,62 @@ impl PriceEngine {
 
     /// Prices every target it can, with provenance for each.
     ///
-    /// A fresh cache that covers every requested target is returned as-is.
-    /// The cache is only used when it is *complete* for this request: serving a
-    /// partial set would silently mix live and stale figures for the same
-    /// portfolio.
+    /// Coins asked about within `CACHE_TTL` are answered from the cache. The
+    /// rest are fetched in one go, together with every other cached coin that
+    /// is due, so a run of per-chain calls costs one request a minute, not
+    /// one per call.
     pub async fn resolve(&self, targets: &[Target]) -> ResolvedMap {
+        self.resolve_at(targets, Instant::now()).await
+    }
+
+    /// `resolve` at a given time; tests move the clock.
+    async fn resolve_at(&self, targets: &[Target], now: Instant) -> ResolvedMap {
         if targets.is_empty() {
             return HashMap::new();
         }
-        if let Some(map) = self.from_cache(targets) {
-            return map;
+        let due = |e: &Entry| now.saturating_duration_since(e.asked) >= CACHE_TTL;
+        let fetch: Vec<Target> = {
+            let Ok(mut cache) = cache().lock() else { return HashMap::new() };
+            // Forget coins nobody has asked about for a while.
+            cache.retain(|_, e| now.saturating_duration_since(e.asked) < STALE_MAX);
+            let mut fetch: Vec<Target> =
+                targets.iter().filter(|t| cache.get(*t).is_none_or(due)).cloned().collect();
+            if !fetch.is_empty() {
+                let others: Vec<Target> =
+                    cache.iter().filter(|(t, e)| due(e) && !fetch.contains(t)).map(|(t, _)| t.clone()).collect();
+                fetch.extend(others);
+                // Marked as asked now, so calls made while this fetch runs do
+                // not start another.
+                for t in &fetch {
+                    cache.entry(t.clone()).or_insert(Entry { asked: now, price: None }).asked = now;
+                }
+            }
+            fetch
+        };
+
+        if !fetch.is_empty() {
+            let fetched = self.fetch(&fetch).await;
+            if let Ok(mut cache) = cache().lock() {
+                for (t, r) in fetched {
+                    cache.insert(t, Entry { asked: now, price: Some((r, now)) });
+                }
+            }
         }
 
+        let Ok(cache) = cache().lock() else { return HashMap::new() };
+        targets
+            .iter()
+            .filter_map(|t| {
+                let (r, at) = cache.get(t)?.price.as_ref()?;
+                (now.saturating_duration_since(*at) <= STALE_MAX).then(|| (t.clone(), r.clone()))
+            })
+            .collect()
+    }
+
+    /// Asks the providers in order, each for what the earlier ones missed.
+    async fn fetch(&self, targets: &[Target]) -> ResolvedMap {
         let mut out: ResolvedMap = HashMap::new();
         let mut missing: Vec<Target> = targets.to_vec();
-
         for provider in &self.providers {
             if missing.is_empty() {
                 break;
@@ -99,48 +148,11 @@ impl PriceEngine {
             }
             let source = Source::from_provider_name(provider.name());
             for (target, price) in answered {
-                out.insert(
-                    target.clone(),
-                    Resolved {
-                        price: price.price,
-                        change: price.change,
-                        source,
-                    },
-                );
+                out.insert(target, Resolved { price: price.price, change: price.change, source });
             }
             missing.retain(|t| !out.contains_key(t));
         }
-
-        // Only cache a non-empty set: caching an empty result would make a
-        // transient outage look authoritative for the whole TTL window.
-        if !out.is_empty() {
-            if let Ok(mut guard) = cache().lock() {
-                *guard = Some(Cached {
-                    at: Instant::now(),
-                    map: out.clone(),
-                });
-            }
-        }
         out
-    }
-
-    /// The cached set, if it is fresh and answers every requested target.
-    fn from_cache(&self, targets: &[Target]) -> Option<ResolvedMap> {
-        let guard = cache().lock().ok()?;
-        let cached = guard.as_ref()?;
-        if cached.at.elapsed() > CACHE_TTL {
-            return None;
-        }
-        if !targets.iter().all(|t| cached.map.contains_key(t)) {
-            return None;
-        }
-        let mut out = ResolvedMap::new();
-        for t in targets {
-            if let Some(r) = cached.map.get(t) {
-                out.insert(t.clone(), r.clone());
-            }
-        }
-        Some(out)
     }
 
     /// Targets no provider could price. Reports coverage gaps rather than
@@ -293,15 +305,121 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn an_empty_result_is_not_cached_as_authoritative() {
+    async fn an_empty_result_is_retried_after_the_window() {
         let _guard = serial();
         invalidate_cache();
+        let now = Instant::now();
         let silent = PriceEngine::with_providers(vec![fake("coingecko", &[])]);
-        assert!(silent.resolve(&[id("ethereum")]).await.is_empty());
+        assert!(silent.resolve_at(&[id("ethereum")], now).await.is_empty());
 
-        // A later successful fetch must still be able to answer.
+        // Once the window has passed, a recovered feed answers.
         let loud = PriceEngine::with_providers(vec![fake("coingecko", &[("ethereum", 3000.0)])]);
-        let got = loud.resolve(&[id("ethereum")]).await;
+        let got = loud.resolve_at(&[id("ethereum")], now + CACHE_TTL + Duration::from_secs(1)).await;
         assert_eq!(got[&id("ethereum")].price, 3000.0);
+    }
+
+    /// Answers a fixed map and records every request it was given.
+    struct Counting {
+        answers: HashMap<Target, CoinPrice>,
+        asked: std::sync::Arc<Mutex<Vec<Vec<Target>>>>,
+    }
+
+    impl Provider for Counting {
+        fn name(&self) -> &'static str {
+            "coingecko"
+        }
+
+        fn prices<'a>(
+            &'a self,
+            targets: &'a [Target],
+        ) -> Pin<Box<dyn Future<Output = PriceMap> + Send + 'a>> {
+            let mut sorted = targets.to_vec();
+            sorted.sort_by_key(|t| format!("{t:?}"));
+            self.asked.lock().unwrap().push(sorted);
+            let answers: PriceMap = self
+                .answers
+                .iter()
+                .filter(|(t, _)| targets.contains(t))
+                .map(|(t, p)| (t.clone(), p.clone()))
+                .collect();
+            Box::pin(async move { answers })
+        }
+    }
+
+    fn counting(answers: &[(&str, f64)]) -> (PriceEngine, std::sync::Arc<Mutex<Vec<Vec<Target>>>>) {
+        let asked = std::sync::Arc::new(Mutex::new(Vec::new()));
+        let provider = Counting {
+            answers: answers
+                .iter()
+                .map(|(t, price)| (id(t), CoinPrice { price: *price, change: 0.0 }))
+                .collect(),
+            asked: asked.clone(),
+        };
+        (PriceEngine::with_providers(vec![Box::new(provider)]), asked)
+    }
+
+    #[tokio::test]
+    async fn one_chain_s_prices_do_not_evict_another_s() {
+        let _guard = serial();
+        invalidate_cache();
+        // The balance watch prices one chain at a time.
+        let (engine, asked) = counting(&[("ethereum", 3000.0), ("binancecoin", 600.0)]);
+        let now = Instant::now();
+        engine.resolve_at(&[id("ethereum")], now).await;
+        engine.resolve_at(&[id("binancecoin")], now).await;
+        let again = engine.resolve_at(&[id("ethereum")], now + Duration::from_secs(15)).await;
+        assert_eq!(again[&id("ethereum")].price, 3000.0);
+        assert_eq!(asked.lock().unwrap().len(), 2, "ethereum is still cached");
+    }
+
+    #[tokio::test]
+    async fn a_coin_no_one_prices_is_not_asked_for_on_every_call() {
+        let _guard = serial();
+        invalidate_cache();
+        let (engine, asked) = counting(&[("ethereum", 3000.0)]);
+        let now = Instant::now();
+        engine.resolve_at(&[id("ethereum"), id("unlisted")], now).await;
+        let got = engine.resolve_at(&[id("ethereum"), id("unlisted")], now + Duration::from_secs(15)).await;
+        assert_eq!(got[&id("ethereum")].price, 3000.0);
+        assert!(!got.contains_key(&id("unlisted")));
+        assert_eq!(asked.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn one_fetch_refreshes_every_stale_price() {
+        let _guard = serial();
+        invalidate_cache();
+        let (engine, asked) = counting(&[("ethereum", 3000.0), ("binancecoin", 600.0)]);
+        let now = Instant::now();
+        engine.resolve_at(&[id("ethereum")], now).await;
+        engine.resolve_at(&[id("binancecoin")], now).await;
+        let later = now + CACHE_TTL + Duration::from_secs(1);
+        engine.resolve_at(&[id("ethereum")], later).await;
+        // The next chain's tick finds its price already fresh.
+        engine.resolve_at(&[id("binancecoin")], later).await;
+        let asked = asked.lock().unwrap();
+        assert_eq!(asked.len(), 3);
+        assert_eq!(asked[2], vec![id("binancecoin"), id("ethereum")]);
+    }
+
+    #[tokio::test]
+    async fn a_throttled_feed_keeps_the_last_price_for_a_while() {
+        let _guard = serial();
+        invalidate_cache();
+        let now = Instant::now();
+        let (loud, _) = counting(&[("ethereum", 3000.0)]);
+        loud.resolve_at(&[id("ethereum")], now).await;
+
+        let (throttled, asked) = counting(&[]);
+        let soon = now + CACHE_TTL + Duration::from_secs(1);
+        let got = throttled.resolve_at(&[id("ethereum")], soon).await;
+        assert_eq!(got[&id("ethereum")].price, 3000.0, "a minute-old price still counts");
+        // Throttled: not asked again until the window passes.
+        throttled.resolve_at(&[id("ethereum")], soon + Duration::from_secs(15)).await;
+        assert_eq!(asked.lock().unwrap().len(), 1);
+
+        // Too old to call live: the app shows its own last-known price instead.
+        let late = throttled.resolve_at(&[id("ethereum")], now + STALE_MAX + Duration::from_secs(1)).await;
+        assert!(late.is_empty());
     }
 }
