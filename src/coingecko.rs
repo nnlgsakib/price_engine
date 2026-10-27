@@ -24,7 +24,7 @@ pub struct CoinGecko {
 impl CoinGecko {
     /// `user_agent` names the wallet. CoinGecko refuses requests that do not
     /// identify themselves, and it is how a rate-limited operator attributes
-    /// usage, so keep it descriptive: `"Nira Wallet/1.0 (+https://example.com)"`.
+    /// usage, so keep it descriptive: `"Example Wallet/1.0 (+https://example.com)"`.
     pub fn new(user_agent: &str) -> Self {
         let client = reqwest::Client::builder()
         // Several addresses per name, some unreachable here (IPv6 with no
